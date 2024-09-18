@@ -2,27 +2,27 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	serviceerrors "krizanauskas.github.com/mvp-proxy/internal/errors"
-
-	"github.com/labstack/echo/v4"
 	"krizanauskas.github.com/mvp-proxy/internal/services"
 )
 
-func ProxyHandler(c echo.Context) error {
-	proxyService := services.NewProxyService(c)
+func ProxyHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("new request to %s \n", r.Host)
+
+	proxyService := services.NewProxyService(w, r)
 
 	err := proxyService.ProxyRequest()
 	var serviceErr *serviceerrors.ServiceError
 
 	if err != nil {
 		if errors.As(err, &serviceErr) {
-			return proxyService.String(serviceErr.Code, serviceErr.Message)
+			http.Error(w, serviceErr.Error(), serviceErr.Code)
+			return
 		}
 
-		return proxyService.String(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
-
-	return nil
 }

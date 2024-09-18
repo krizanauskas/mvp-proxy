@@ -2,14 +2,15 @@ package services
 
 import (
 	"io"
+	"net"
 	"net/http"
 
-	"github.com/labstack/echo/v4"
 	"krizanauskas.github.com/mvp-proxy/internal/errors"
 )
 
 type ProxyService struct {
-	echo.Context
+	responseWriter http.ResponseWriter
+	request        *http.Request
 }
 
 var hopHeaders = []string{
@@ -23,24 +24,29 @@ var hopHeaders = []string{
 	"Upgrade",
 }
 
-func NewProxyService(c echo.Context) ProxyService {
-	return ProxyService{
-		c,
+func NewProxyService(w http.ResponseWriter, r *http.Request) *ProxyService {
+	return &ProxyService{
+		w,
+		r,
 	}
 }
 
-func (ps ProxyService) ProxyRequest() error {
-	return ps.handleHttpProxy()
+func (ps *ProxyService) ProxyRequest() error {
+	if ps.request.Method == http.MethodConnect {
+		return ps.handleHttps()
+	}
+
+	return ps.handleHttp()
 }
 
-func (ps ProxyService) handleHttpProxy() error {
-	proxyReq, err := http.NewRequest(ps.Request().Method, ps.Request().URL.String(), ps.Request().Body)
+func (ps *ProxyService) handleHttp() error {
+	proxyReq, err := http.NewRequest(ps.request.Method, ps.request.URL.String(), ps.request.Body)
 	if err != nil {
 		return &errors.ServiceError{Code: http.StatusBadRequest, Message: http.StatusText(http.StatusBadRequest)}
 	}
-	proxyReq.Header = ps.Request().Header.Clone()
+	proxyReq.Header = ps.request.Header.Clone()
 
-	proxyReq = proxyReq.WithContext(ps.Request().Context())
+	proxyReq = proxyReq.WithContext(ps.request.Context())
 
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
@@ -55,16 +61,49 @@ func (ps ProxyService) handleHttpProxy() error {
 		}
 
 		for _, value := range values {
-			ps.Response().Header().Add(key, value)
+			ps.responseWriter.Header().Add(key, value)
 		}
 	}
 
-	ps.Response().WriteHeader(resp.StatusCode)
+	ps.responseWriter.WriteHeader(resp.StatusCode)
 
-	_, err = io.Copy(ps.Response(), resp.Body)
+	_, err = io.Copy(ps.responseWriter, resp.Body)
 	if err != nil {
 		// log error
 	}
+
+	return nil
+}
+
+func (ps *ProxyService) handleHttps() error {
+	destConn, err := net.Dial("tcp", ps.request.Host)
+	if err != nil {
+		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
+	}
+
+	ps.responseWriter.WriteHeader(http.StatusOK)
+
+	hijacker, ok := ps.responseWriter.(http.Hijacker)
+	if !ok {
+		return &errors.ServiceError{Code: http.StatusInternalServerError, Message: http.StatusText(http.StatusInternalServerError)}
+	}
+
+	// hijack client TCP connection
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
+	}
+
+	go func() {
+		defer destConn.Close()
+		defer clientConn.Close()
+		io.Copy(destConn, clientConn)
+	}()
+	go func() {
+		defer destConn.Close()
+		defer clientConn.Close()
+		io.Copy(clientConn, destConn)
+	}()
 
 	return nil
 }

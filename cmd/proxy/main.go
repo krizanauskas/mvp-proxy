@@ -21,10 +21,14 @@ func main() {
 		log.Fatalf("failed to init config: %s", err.Error())
 	}
 
-	proxyServer, err := server.New()
+	proxyServer, err := server.New(cfg.ProxyServer.Port)
 	if err != nil {
 		log.Fatalf("failed to init proxy server: %s", err.Error())
 	}
 
-	proxyServer.Start(cfg.ProxyServer.Port)
+	proxyServer.InitRoutes()
+
+	if err := proxyServer.Start(); err != nil {
+		log.Fatalf("failed to start proxy server: %s", err.Error())
+	}
 }

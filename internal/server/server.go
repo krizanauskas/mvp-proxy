@@ -1,26 +1,46 @@
 package server
 
 import (
-	"github.com/labstack/echo/v4"
+	"fmt"
+	"net/http"
+
 	"krizanauskas.github.com/mvp-proxy/internal/handlers"
 )
 
 type Server struct {
-	*echo.Echo
+	httpServer *http.Server
+	mux        *http.ServeMux
 }
 
-func New() (*Server, error) {
-	e := echo.New()
+func New(serverPort string) (*Server, error) {
+	mux := http.NewServeMux()
 
-	s := &Server{
-		e,
+	httpServer := &http.Server{
+		Addr: serverPort,
 	}
 
-	s.initRoutes()
+	server := &Server{
+		httpServer,
+		mux,
+	}
 
-	return s, nil
+	server.httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			handlers.ProxyHandler(w, r)
+		} else {
+			// Forward other requests to the ServeMux for routing
+			server.mux.ServeHTTP(w, r)
+		}
+	})
+
+	return server, nil
 }
 
-func (s *Server) initRoutes() {
-	s.GET("/*", handlers.ProxyHandler)
+func (s *Server) InitRoutes() {
+	s.mux.HandleFunc("/*", handlers.ProxyHandler)
+}
+
+func (s *Server) Start() error {
+	fmt.Println("Starting server on", s.httpServer.Addr)
+	return s.httpServer.ListenAndServe()
 }
