@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +25,23 @@ var hopHeaders = []string{
 	"Upgrade",
 }
 
+var httpsCopyDone = make(chan struct{}, 2)
+
+var httpsCopyFunc = func(dst io.Writer, src io.Reader) {
+	_, err := io.Copy(dst, src)
+	if err != nil {
+		fmt.Printf("Error copying data: %v", err)
+	}
+	httpsCopyDone <- struct{}{}
+}
+
+var httpCopyDone = make(chan error, 1)
+
+var httpCopyFunc = func(dst http.ResponseWriter, resp io.ReadCloser) {
+	_, copyErr := io.Copy(dst, resp)
+	httpCopyDone <- copyErr
+}
+
 func NewProxyService(w http.ResponseWriter, r *http.Request) *ProxyService {
 	return &ProxyService{
 		w,
@@ -40,6 +58,8 @@ func (ps *ProxyService) ProxyRequest() error {
 }
 
 func (ps *ProxyService) handleHttp() error {
+	ctx := ps.request.Context()
+
 	proxyReq, err := http.NewRequest(ps.request.Method, ps.request.URL.String(), ps.request.Body)
 	if err != nil {
 		return &errors.ServiceError{Code: http.StatusBadRequest, Message: http.StatusText(http.StatusBadRequest)}
@@ -67,15 +87,26 @@ func (ps *ProxyService) handleHttp() error {
 
 	ps.responseWriter.WriteHeader(resp.StatusCode)
 
-	_, err = io.Copy(ps.responseWriter, resp.Body)
-	if err != nil {
-		// log error
+	go httpCopyFunc(ps.responseWriter, resp.Body)
+
+	select {
+	case <-ctx.Done():
+		// Context was canceled or timed out
+		fmt.Printf("Context canceled or timed out: %v", ctx.Err())
+		return ctx.Err()
+	case copyErr := <-httpCopyDone:
+		if copyErr != nil {
+			fmt.Printf("Error copying response body: %v", copyErr)
+			return copyErr
+		}
 	}
 
 	return nil
 }
 
 func (ps *ProxyService) handleHttps() error {
+	ctx := ps.request.Context()
+
 	destConn, err := net.Dial("tcp", ps.request.Host)
 	if err != nil {
 		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
@@ -94,16 +125,23 @@ func (ps *ProxyService) handleHttps() error {
 		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
 	}
 
-	go func() {
-		defer destConn.Close()
-		defer clientConn.Close()
-		io.Copy(destConn, clientConn)
-	}()
-	go func() {
-		defer destConn.Close()
-		defer clientConn.Close()
-		io.Copy(clientConn, destConn)
-	}()
+	go httpsCopyFunc(destConn, clientConn)
+	go httpsCopyFunc(clientConn, destConn)
+
+	// Listen for context cancellation or copying completion
+	select {
+	case <-ctx.Done():
+		fmt.Printf("Context canceled or timed out: %v", ctx.Err())
+		// Close both connections to terminate the tunnel
+		clientConn.Close()
+		destConn.Close()
+		return ctx.Err()
+	case <-httpsCopyDone:
+	}
+
+	<-httpsCopyDone
+
+	fmt.Println("finished")
 
 	return nil
 }

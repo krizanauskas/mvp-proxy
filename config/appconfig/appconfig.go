@@ -7,7 +7,8 @@ import (
 )
 
 type ProxyServerConfig struct {
-	Port string `mapstructure:"port"`
+	Port                  string `mapstructure:"port"`
+	MaxRequestDurationSec int    `mapstructure:"max_request_duration_sec"`
 }
 
 type AppConfig struct {
