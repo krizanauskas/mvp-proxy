@@ -11,7 +11,9 @@ import (
 
 	"github.com/joho/godotenv"
 	"krizanauskas.github.com/mvp-proxy/config/appconfig"
+	"krizanauskas.github.com/mvp-proxy/internal/middlewares"
 	"krizanauskas.github.com/mvp-proxy/internal/server"
+	"krizanauskas.github.com/mvp-proxy/internal/services"
 )
 
 func main() {
@@ -26,12 +28,13 @@ func main() {
 		log.Fatalf("failed to init config: %s", err.Error())
 	}
 
-	proxyServer, err := server.New(cfg.ProxyServer)
+	authService := services.NewAuthService()
+	authMiddleware := middlewares.NewBasicAuthMiddleware(authService)
+
+	proxyServer, err := server.New(cfg.ProxyServer, authMiddleware.Middleware)
 	if err != nil {
 		log.Fatalf("failed to init proxy server: %s", err.Error())
 	}
-
-	proxyServer.InitRoutes()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

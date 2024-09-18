@@ -8,46 +8,39 @@ import (
 
 	"krizanauskas.github.com/mvp-proxy/config/appconfig"
 	"krizanauskas.github.com/mvp-proxy/internal/handlers"
+	"krizanauskas.github.com/mvp-proxy/internal/middlewares"
 )
 
 type Server struct {
 	httpServer *http.Server
-	mux        *http.ServeMux
 }
 
-func New(cfg appconfig.ProxyServerConfig) (*Server, error) {
-	mux := http.NewServeMux()
-
-	httpServer := &http.Server{
-		Addr:              cfg.Port,
-		ReadHeaderTimeout: time.Second * 5,
-		IdleTimeout:       time.Second * 60,
-	}
-
-	server := &Server{
-		httpServer,
-		mux,
-	}
-
-	server.httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func New(cfg appconfig.ProxyServerConfig, m ...func(http.Handler) http.Handler) (*Server, error) {
+	handlerFunc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.MaxRequestDurationSec)*time.Second)
 		defer cancel()
 
 		r = r.WithContext(ctx)
 
-		if r.Method == http.MethodConnect {
-			handlers.ProxyHandler(w, r)
-		} else {
-			// Forward other requests to the ServeMux for routing
-			server.mux.ServeHTTP(w, r)
-		}
+		proxyHandler := http.HandlerFunc(handlers.ProxyHandler)
+
+		handler := middlewares.ChainMiddleware(proxyHandler, m...)
+
+		handler.ServeHTTP(w, r)
 	})
 
-	return server, nil
-}
+	httpServer := &http.Server{
+		Addr:              cfg.Port,
+		ReadHeaderTimeout: time.Second * 5,
+		IdleTimeout:       time.Second * 60,
+		Handler:           handlerFunc,
+	}
 
-func (s *Server) InitRoutes() {
-	s.mux.HandleFunc("/", handlers.ProxyHandler)
+	server := &Server{
+		httpServer,
+	}
+
+	return server, nil
 }
 
 func (s *Server) Start() error {
