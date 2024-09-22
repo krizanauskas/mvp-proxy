@@ -1,3 +1,6 @@
 proxy_server:
   port: ":8080"
   max_request_duration_sec: 7200
+  allowed_data_mb: 1000
+status_server:
+  port: ":3333"

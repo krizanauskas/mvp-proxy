@@ -2,20 +2,27 @@ package handlers
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
-	serviceerrors "krizanauskas.github.com/mvp-proxy/internal/errors"
+	internalerrors "krizanauskas.github.com/mvp-proxy/internal/errors"
 	"krizanauskas.github.com/mvp-proxy/internal/services"
 )
 
-func ProxyHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("new request to %s \n", r.Host)
+type ProxyHandler struct {
+	userService services.UserServiceI
+}
 
-	proxyService := services.NewProxyService(w, r)
+func NewProxyHandler(userService services.UserServiceI) ProxyHandler {
+	return ProxyHandler{
+		userService,
+	}
+}
+
+func (s ProxyHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	proxyService := services.NewProxyService(w, r, s.userService)
 
 	err := proxyService.ProxyRequest()
-	var serviceErr *serviceerrors.ServiceError
+	var serviceErr *internalerrors.ServiceError
 
 	if err != nil {
 		if errors.As(err, &serviceErr) {

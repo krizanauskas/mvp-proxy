@@ -15,14 +15,14 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func New(cfg appconfig.ProxyServerConfig, m ...func(http.Handler) http.Handler) (*Server, error) {
+func New(cfg appconfig.ProxyServerConfig, proxyHandler handlers.ProxyHandler, m ...func(http.Handler) http.Handler) (*Server, error) {
 	handlerFunc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.MaxRequestDurationSec)*time.Second)
 		defer cancel()
 
 		r = r.WithContext(ctx)
 
-		proxyHandler := http.HandlerFunc(handlers.ProxyHandler)
+		proxyHandler := http.HandlerFunc(proxyHandler.Handle)
 
 		handler := middlewares.ChainMiddleware(proxyHandler, m...)
 

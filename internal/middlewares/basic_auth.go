@@ -1,6 +1,7 @@
 package middlewares
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -9,12 +10,17 @@ import (
 	"krizanauskas.github.com/mvp-proxy/internal/services"
 )
 
-const ProxyUsername = "user"
-const ProxyPassword = "pass"
+type contextKey string
+
+const userContextKey = contextKey("user")
 
 type credentials struct {
 	username string
 	password string
+}
+
+type User struct {
+	Username string
 }
 
 type AuthMiddleware interface {
@@ -37,18 +43,21 @@ func (m BasicAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		if err != nil {
 			w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
 			http.Error(w, "failed to parse credentials", http.StatusProxyAuthRequired)
-
-			fmt.Printf("error: %s", err.Error())
 			return
 		}
 
 		if !m.authService.Authenticate(credentials.username, credentials.password) {
 			w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
 			http.Error(w, "failed to authenticate", http.StatusProxyAuthRequired)
-
-			fmt.Printf("failed to authenticate")
 			return
 		}
+
+		user := &User{
+			Username: credentials.username,
+		}
+
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+		r = r.WithContext(ctx)
 
 		next.ServeHTTP(w, r)
 	})

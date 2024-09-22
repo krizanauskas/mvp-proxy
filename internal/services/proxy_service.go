@@ -1,10 +1,13 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
 	"krizanauskas.github.com/mvp-proxy/internal/errors"
 )
@@ -12,6 +15,7 @@ import (
 type ProxyService struct {
 	responseWriter http.ResponseWriter
 	request        *http.Request
+	userService    UserServiceI
 }
 
 var hopHeaders = []string{
@@ -25,36 +29,160 @@ var hopHeaders = []string{
 	"Upgrade",
 }
 
-var httpsCopyDone = make(chan struct{}, 2)
-
-var httpsCopyFunc = func(dst io.Writer, src io.Reader) {
-	_, err := io.Copy(dst, src)
-	if err != nil {
-		fmt.Printf("Error copying data: %v", err)
-	}
-	httpsCopyDone <- struct{}{}
-}
-
 var httpCopyDone = make(chan error, 1)
 
-var httpCopyFunc = func(dst http.ResponseWriter, resp io.ReadCloser) {
-	_, copyErr := io.Copy(dst, resp)
+var httpCopyFunc = func(dst http.ResponseWriter, resp io.ReadCloser, bandwidthController UserBandwidthControllerI) {
+	defer resp.Close()
+
+	bytesCopied, copyErr := io.Copy(dst, resp)
 	httpCopyDone <- copyErr
+
+	bandwidthController.UpdateBandwidthUsed(AuthUser, int(bytesCopied))
 }
 
-func NewProxyService(w http.ResponseWriter, r *http.Request) *ProxyService {
+func copyWithBandwidthFunc(ctx context.Context, dst io.Writer, src io.Reader, user string, bandwidthController UserBandwidthControllerI, methodConnect bool) error {
+	// 1 MB buffer for copying data in chunks
+	const bufferSize = 1000 * 1000
+
+	buffer := make([]byte, bufferSize)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		userLimit := bandwidthController.GetAvailableBandwidth(user)
+
+		if userLimit <= 0 {
+			fmt.Printf("No available bandwidth for user: %s\n", user)
+			break // Exit the loop if no bandwidth is available
+		}
+
+		limitedReader := &io.LimitedReader{
+			R: src,
+			N: int64(userLimit),
+		}
+
+		n, err := limitedReader.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("error reading data: %w", err)
+		}
+
+		if n == 0 {
+			if err == io.EOF {
+				return nil
+			}
+			break
+		}
+
+		var written int
+		var writeErr error
+
+		if methodConnect {
+			written, writeErr = dst.Write(buffer[:n])
+			if writeErr != nil {
+				return fmt.Errorf("error writing data: %w", writeErr)
+			}
+		}
+
+		bandwidthController.UpdateBandwidthUsed(user, written)
+
+		// If EOF is reached, exit the loop
+		if err == io.EOF {
+			return nil
+		}
+	}
+
+	return nil
+}
+
+func NewProxyService(w http.ResponseWriter, r *http.Request, userService UserServiceI) *ProxyService {
 	return &ProxyService{
 		w,
 		r,
+		userService,
 	}
 }
 
 func (ps *ProxyService) ProxyRequest() error {
+	ps.userService.AddToHistory(AuthUser, getFullURL(ps.request), time.Now())
+
 	if ps.request.Method == http.MethodConnect {
 		return ps.handleHttps()
 	}
 
 	return ps.handleHttp()
+}
+
+func (ps *ProxyService) handleHttps() error {
+	ctx := ps.request.Context()
+
+	destConn, err := net.Dial("tcp", ps.request.Host)
+	if err != nil {
+		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
+	}
+
+	ps.responseWriter.WriteHeader(http.StatusOK)
+
+	hijacker, ok := ps.responseWriter.(http.Hijacker)
+	if !ok {
+		return &errors.ServiceError{Code: http.StatusInternalServerError, Message: http.StatusText(http.StatusInternalServerError)}
+	}
+
+	// hijack client TCP connection
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil || clientConn == nil {
+		destConn.Close()
+		return &errors.ServiceError{
+			Code:    http.StatusServiceUnavailable,
+			Message: "Failed to hijack connection",
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		defer wg.Done()
+		if err := copyWithBandwidthFunc(ctx, destConn, clientConn, AuthUser, ps.userService, true); err != nil {
+			fmt.Printf("Error copying from destConn to clientConn: %v\n", err)
+			cancel()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if err := copyWithBandwidthFunc(ctx, clientConn, destConn, AuthUser, ps.userService, true); err != nil {
+			fmt.Printf("Error copying from clientConn to destConn: %v\n", err)
+			cancel()
+		}
+	}()
+
+	doneChan := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-ctx.Done():
+		fmt.Printf("Context canceled or timed out: %v", ctx.Err())
+
+		clientConn.Close()
+		destConn.Close()
+		return ctx.Err()
+	case <-doneChan:
+	}
+
+	fmt.Println("finished")
+
+	return nil
 }
 
 func (ps *ProxyService) handleHttp() error {
@@ -87,7 +215,7 @@ func (ps *ProxyService) handleHttp() error {
 
 	ps.responseWriter.WriteHeader(resp.StatusCode)
 
-	go httpCopyFunc(ps.responseWriter, resp.Body)
+	go httpCopyFunc(ps.responseWriter, resp.Body, ps.userService)
 
 	select {
 	case <-ctx.Done():
@@ -104,48 +232,6 @@ func (ps *ProxyService) handleHttp() error {
 	return nil
 }
 
-func (ps *ProxyService) handleHttps() error {
-	ctx := ps.request.Context()
-
-	destConn, err := net.Dial("tcp", ps.request.Host)
-	if err != nil {
-		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
-	}
-
-	ps.responseWriter.WriteHeader(http.StatusOK)
-
-	hijacker, ok := ps.responseWriter.(http.Hijacker)
-	if !ok {
-		return &errors.ServiceError{Code: http.StatusInternalServerError, Message: http.StatusText(http.StatusInternalServerError)}
-	}
-
-	// hijack client TCP connection
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		return &errors.ServiceError{Code: http.StatusServiceUnavailable, Message: http.StatusText(http.StatusServiceUnavailable)}
-	}
-
-	go httpsCopyFunc(destConn, clientConn)
-	go httpsCopyFunc(clientConn, destConn)
-
-	// Listen for context cancellation or copying completion
-	select {
-	case <-ctx.Done():
-		fmt.Printf("Context canceled or timed out: %v", ctx.Err())
-		// Close both connections to terminate the tunnel
-		clientConn.Close()
-		destConn.Close()
-		return ctx.Err()
-	case <-httpsCopyDone:
-	}
-
-	<-httpsCopyDone
-
-	fmt.Println("finished")
-
-	return nil
-}
-
 func isHopByHopHeader(header string) bool {
 	header = http.CanonicalHeaderKey(header)
 	for _, h := range hopHeaders {
@@ -154,4 +240,19 @@ func isHopByHopHeader(header string) bool {
 		}
 	}
 	return false
+}
+
+func getFullURL(r *http.Request) string {
+	scheme := "http"
+
+	if r.Method == http.MethodConnect {
+		scheme = "https"
+	}
+
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host = r.Host
+	}
+
+	return fmt.Sprintf("%s://%s", scheme, host)
 }

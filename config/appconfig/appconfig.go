@@ -9,10 +9,16 @@ import (
 type ProxyServerConfig struct {
 	Port                  string `mapstructure:"port"`
 	MaxRequestDurationSec int    `mapstructure:"max_request_duration_sec"`
+	AllowedDataMB         int    `mapstructure:"allowed_data_mb"`
+}
+
+type StatusServerConfig struct {
+	Port string `mapstructure:"port"`
 }
 
 type AppConfig struct {
-	ProxyServer ProxyServerConfig `mapstructure:"proxy_server"`
+	ProxyServer  ProxyServerConfig  `mapstructure:"proxy_server"`
+	StatusServer StatusServerConfig `mapstructure:"status_server"`
 }
 
 func Init(env string) (*AppConfig, error) {
