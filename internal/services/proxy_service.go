@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -27,17 +28,6 @@ var hopHeaders = []string{
 	"Trailer",
 	"Transfer-Encoding",
 	"Upgrade",
-}
-
-var httpCopyDone = make(chan error, 1)
-
-var httpCopyFunc = func(dst http.ResponseWriter, resp io.ReadCloser, bandwidthController UserBandwidthControllerI) {
-	defer resp.Close()
-
-	bytesCopied, copyErr := io.Copy(dst, resp)
-	httpCopyDone <- copyErr
-
-	bandwidthController.UpdateBandwidthUsed(AuthUser, int(bytesCopied))
 }
 
 func copyWithBandwidthFunc(ctx context.Context, dst io.Writer, src io.Reader, user string, bandwidthController UserBandwidthControllerI, methodConnect bool) error {
@@ -77,21 +67,20 @@ func copyWithBandwidthFunc(ctx context.Context, dst io.Writer, src io.Reader, us
 			break
 		}
 
-		var written int
-		var writeErr error
-
 		if methodConnect {
-			written, writeErr = dst.Write(buffer[:n])
+			written, writeErr := dst.Write(buffer[:n])
+			bandwidthController.UpdateBandwidthUsed(user, written)
+
 			if writeErr != nil {
 				return fmt.Errorf("error writing data: %w", writeErr)
 			}
-		}
+		} else {
+			copied, copyErr := io.CopyN(dst, bytes.NewReader(buffer[:n]), int64(n))
+			bandwidthController.UpdateBandwidthUsed(user, int(copied))
 
-		bandwidthController.UpdateBandwidthUsed(user, written)
-
-		// If EOF is reached, exit the loop
-		if err == io.EOF {
-			return nil
+			if copyErr != nil {
+				return fmt.Errorf("error writing data: %w", copyErr)
+			}
 		}
 	}
 
@@ -128,6 +117,7 @@ func (ps *ProxyService) handleHttps() error {
 
 	hijacker, ok := ps.responseWriter.(http.Hijacker)
 	if !ok {
+		destConn.Close()
 		return &errors.ServiceError{Code: http.StatusInternalServerError, Message: http.StatusText(http.StatusInternalServerError)}
 	}
 
@@ -149,6 +139,8 @@ func (ps *ProxyService) handleHttps() error {
 
 	go func() {
 		defer wg.Done()
+		defer clientConn.Close()
+
 		if err := copyWithBandwidthFunc(ctx, destConn, clientConn, AuthUser, ps.userService, true); err != nil {
 			fmt.Printf("Error copying from destConn to clientConn: %v\n", err)
 			cancel()
@@ -157,6 +149,8 @@ func (ps *ProxyService) handleHttps() error {
 
 	go func() {
 		defer wg.Done()
+		defer destConn.Close()
+
 		if err := copyWithBandwidthFunc(ctx, clientConn, destConn, AuthUser, ps.userService, true); err != nil {
 			fmt.Printf("Error copying from clientConn to destConn: %v\n", err)
 			cancel()
@@ -180,8 +174,6 @@ func (ps *ProxyService) handleHttps() error {
 	case <-doneChan:
 	}
 
-	fmt.Println("finished")
-
 	return nil
 }
 
@@ -195,8 +187,8 @@ func (ps *ProxyService) handleHttp() error {
 	proxyReq.Header = ps.request.Header.Clone()
 
 	proxyReq = proxyReq.WithContext(ps.request.Context())
-
 	client := &http.Client{}
+
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		return &errors.ServiceError{Code: http.StatusBadGateway, Message: http.StatusText(http.StatusBadGateway)}
@@ -215,21 +207,35 @@ func (ps *ProxyService) handleHttp() error {
 
 	ps.responseWriter.WriteHeader(resp.StatusCode)
 
-	go httpCopyFunc(ps.responseWriter, resp.Body, ps.userService)
+	var copyErrChan = make(chan error, 1)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		defer close(copyErrChan)
+
+		err := copyWithBandwidthFunc(ctx, ps.responseWriter, resp.Body, AuthUser, ps.userService, true)
+
+		if err != nil {
+			fmt.Printf("Error copying from destination to client: %v\n", err)
+			copyErrChan <- err
+		}
+	}()
 
 	select {
-	case <-ctx.Done():
-		// Context was canceled or timed out
-		fmt.Printf("Context canceled or timed out: %v", ctx.Err())
-		return ctx.Err()
-	case copyErr := <-httpCopyDone:
+	case copyErr := <-copyErrChan:
 		if copyErr != nil {
 			fmt.Printf("Error copying response body: %v", copyErr)
 			return copyErr
 		}
-	}
 
-	return nil
+		return nil
+	case <-ctx.Done():
+		// Context was canceled or timed out
+		fmt.Printf("Context canceled or timed out: %v\n", ctx.Err())
+		return ctx.Err()
+	}
 }
 
 func isHopByHopHeader(header string) bool {
