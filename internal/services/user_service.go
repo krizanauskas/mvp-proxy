@@ -1,5 +1,7 @@
 package services
 
+//go:generate mockgen -source=user_service.go -destination=../../tests/mocks/user_service_mock.go -package=mock_services
+
 import (
 	"time"
 
@@ -15,7 +17,6 @@ type UserServiceI interface {
 	UserBandwidthControllerI
 	GetBandwidthUsed(username string) int
 	AddToHistory(user, host string, time time.Time) error
-	GetHistory(user string) ([]string, error)
 }
 
 type UserService struct {
@@ -28,10 +29,6 @@ func NewUserService(userHistoryStore storage.UserHistoryStoreI, userBandwidhtSto
 		userHistoryStore,
 		userBandwidhtStore,
 	}
-}
-
-func (s UserService) GetHistory(username string) ([]string, error) {
-	return []string{"https://google.lt", "https://delfi.lt "}, nil
 }
 
 func (s UserService) GetBandwidthUsed(username string) int {

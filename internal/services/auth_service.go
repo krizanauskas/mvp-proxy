@@ -1,5 +1,7 @@
 package services
 
+//go:generate mockgen -source=auth_service.go -destination=../../tests/mocks/auth_service_mock.go -package=mock_services
+
 type AuthServiceI interface {
 	Authenticate(username, pass string) bool
 }

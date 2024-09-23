@@ -22,7 +22,7 @@ func NewBandwidthLimitMiddleware(bandwidthController services.UserBandwidthContr
 func (m BandwidthLimitMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
-		user, ok := r.Context().Value(userContextKey).(*User)
+		user, ok := r.Context().Value(UserContextKey).(*User)
 		if !ok {
 			http.Error(w, "User not found", http.StatusUnauthorized)
 			return

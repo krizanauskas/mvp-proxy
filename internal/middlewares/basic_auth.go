@@ -12,7 +12,7 @@ import (
 
 type contextKey string
 
-const userContextKey = contextKey("user")
+const UserContextKey = contextKey("user")
 
 type credentials struct {
 	username string
@@ -56,7 +56,7 @@ func (m BasicAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			Username: credentials.username,
 		}
 
-		ctx := context.WithValue(r.Context(), userContextKey, user)
+		ctx := context.WithValue(r.Context(), UserContextKey, user)
 		r = r.WithContext(ctx)
 
 		next.ServeHTTP(w, r)
