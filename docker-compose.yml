@@ -1,0 +1,11 @@
+services:
+  proxyapp:
+    image: proxyapp
+    build:
+      context: .
+      args:
+        APP_ENV: ${APP_ENV:-dev}
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "3333:3333"

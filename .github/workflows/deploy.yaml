@@ -1,0 +1,32 @@
+name: Build and deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Log in to GitHub Container Registry
+      run: echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    - name: Build Docker image
+      run: |
+        docker build -t ghcr.io/${{ github.actor }}/proxyapp:latest \
+                    -t ghcr.io/${{ github.actor }}/proxyapp:${{ github.sha }} \
+                    --build-arg APP_ENV=dev .
+
+    - name: Push Docker image to GitHub Container Registry
+      run: |
+        docker push ghcr.io/${{ github.actor }}/proxyapp:latest
+        docker push ghcr.io/${{ github.actor }}/proxyapp:${{ github.sha }}
+
+    - name: Deploy to Docker Swarm
+      run: |
+        docker service update --image ghcr.io/${{ github.actor }}/proxyapp:latest proxyapp_proxyapp
